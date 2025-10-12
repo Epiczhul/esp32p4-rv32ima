@@ -31,7 +31,7 @@ It uses one 32MB PSRAM chip as the system memory. On startup, it initializes the
 - a usb-c cable to debug
 
 ## How to use
-- build uc-rv32ima with esp idf env ```idf.py build```
+- build esp32p4-rv32ima with esp idf env ```idf.py build```
 - flash using idf.py ```idf.py -p /dev/ttyUSB0 -b 921600 flash```
 - flash Image using esptool just to make sure its flashed correctly ```esptool.py --chip esp32p4 -p /dev/ttyUSB0 -b 921600 write_flash 0x110000 main/Image```
 
