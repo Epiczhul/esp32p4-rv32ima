@@ -1,20 +1,19 @@
 # uc-rv32ima
-Run linux on various MCUs with the help of RISC-V emulator. This project uses [CNLohr's mini-rv32ima](https://github.com/cnlohr/mini-rv32ima) RISC-V emulator core to run Linux on various MCUs such as ESP32C3, RP2040, STM32F103 etc. Although, only ESP32C3 is tested now. In theory, ESP series SoCs are supported, but except ESP32C3 I don't have other SoCs' dev boards, so I can't test them.
+Run linux on various MCUs with the help of RISC-V emulator. This project uses [CNLohr's mini-rv32ima](https://github.com/cnlohr/mini-rv32ima) RISC-V emulator core to run Linux on various MCUs such as ESP32P4. Although, only ESP32P4 is tested now.
 
 ## Why
 - Just for fun
-- When CNLohr wrote [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima), he said he wanted to run linux on ESP32C3, I was interested in that idea too.
 
-## What's missing if we want to run linux on ESP32C3
+## What's missing if we want to run linux on ESP32P4
 - A single RV32-IMC cpu core, well, this can be solved by patching the linux kernel to remove the 'A' extension usage
 - No MMU, well, this can be solved by using NOMMU
-- No enough memory, only 4MB flash and 400KB sram, well, this can be solved by adding one SPI PSRAM chip. However,
-- I can't make ESP32C3 directly executing code on PSRAM work as ESP32S3 does. If anyone knows the howto, kindly tell me, I really appreciate it;) Then we can directly run linux on ESP32C3!
+- No enough memory, only 16MB flash and 768KB sram, well, this can be solved by using the 32MB PSRAM chip. However,
+- I don't know how to make ESP32P4 directly execute code on PSRAM like the ESP32S3 does. If anyone knows the howto, kindly tell me, I really appreciate it;) Then we can directly run linux on ESP32P4!
 
 So far, the idea solution is to use a RISC-V IMA emulator, and use the PSRAM as the emulator's main system memory.
 
 ## How it works
-It uses one 8MB SPI PSRAM chip as the system memory. On startup, it initializes the PSRAM, and load linux kernel Image(an initramfs is embedded which is used as rootfs) and device tree binary from flash to PSRAM, then start the booting.
+It uses one 32MB PSRAM chip as the system memory. On startup, it initializes the PSRAM, and load linux kernel Image(an initramfs is embedded which is used as rootfs) and device tree binary from flash to PSRAM, then start the booting.
 
 - To improve the performance, a simple cache is implemented, it turns out we acchieved 95.1% cache hit during linux booting:
     - 4KB cache
@@ -23,34 +22,21 @@ It uses one 8MB SPI PSRAM chip as the system memory. On startup, it initializes 
     - LRU
 
 ## Difference from [tvlad1234's pico-rv32ima](https://github.com/tvlad1234/pico-rv32ima)
-- esp32c3 VS rp2040, although rp2040 will be supported too in uc-rv32ima
-- only one 8MB SPI PSRAM is needed
+- esp32p4 VS rp2040
 - a simple cache mechanism is implemented, thus much better performance
-- no need sdcard
+- no need sdcard (maybe implementing booting from sdcard in future)
 
 ## Requirements
-- one ESP32C3 development board
-- one 8 megabyte (64Mbit) SPI PSRAM chip (I used PSRAM64H) and solder it on a SOP8 adapter board, then properly connect the adapter board with MCU dev board with dupont line.
+- one ESP32-P4 development board. (this one was used to test this project: [Guition JC-ESP32P4-M3 DEV Board](https://www.surenoo.com/collections/258652/products/27872758?data_from=collection_detail))
+- a usb-c cable to debug
 
 ## How to use
-- Ensure the SPI PSRAM chip pins are properly connected with your MCU board. E.g the PSRAM is connected with below GPIOs of ESP32C3, and don't forget VCC and GND pins:
-    - MOSI: GPIO7
-    - MISO: GPIO2
-    - CS: GPIO10
-    - SCLK: GPIO6
-
-- build uc-rv32ima with esp idf env
-
-- write imgs to the board's flash as following with esptool then reset the board
-    - 0x10000 build/uc-rv32ima.bin
-    - 0x8000 build/partition_table/partition-table.bin
-    - 0x200000 main/Image
-    - 0x3ff000 main/uc.dtb
+- build uc-rv32ima with esp idf env ```idf.py build```
+- flash using idf.py ```idf.py -p /dev/ttyUSB0 -b 921600 flash```
+- flash Image using esptool just to make sure its flashed correctly ```esptool.py --chip esp32p4 -p /dev/ttyUSB0 -b 921600 write_flash 0x110000 main/Image```
 
 - In no less than 1 sec, Linux kernel messages starts printing on the USB CDC console. The boot process from pressing reset button to linux shell takes about 1 minute and 20 seconds.
 
 
-
-
-https://user-images.githubusercontent.com/113400028/233841610-6e770b58-c1b3-48ad-8190-e623983dd8b3.mp4
+- still couldnt get command input working... uart wont work for input, only output.
 
