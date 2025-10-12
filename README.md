@@ -35,7 +35,7 @@ It uses one 32MB PSRAM chip as the system memory. On startup, it initializes the
 - flash using idf.py ```idf.py -p /dev/ttyUSB0 -b 921600 flash```
 - flash Image using esptool just to make sure its flashed correctly ```esptool.py --chip esp32p4 -p /dev/ttyUSB0 -b 921600 write_flash 0x110000 main/Image```
 
-- In no less than 1 sec, Linux kernel messages starts printing on the USB CDC console. The boot process from pressing reset button to linux shell takes about 1 minute and 20 seconds.
+- In no less than 1 sec, Linux kernel messages starts printing on the USB CDC console. The boot process from pressing reset button to linux shell takes about 17.9s (psram at 80mhz).
 
 
 - still couldnt get command input working... uart wont work for input, only output.
