@@ -46,7 +46,8 @@ static inline int get_index(uint32_t addr)
 void cache_write(uint32_t ofs, void *buf, uint32_t size)
 {
 	if (((ofs | (64 - 1)) != ((ofs + size - 1) | (64 - 1))))
-		printf("write cross boundary, ofs:%x size:%x\n", ofs, size);
+		// printf("write cross boundary, ofs:%x size:%x\n", ofs, size);
+		printf("write cross boundary, ofs:%lx size:%lx\n", (unsigned long)ofs, (unsigned long)size);
 
 	int ti, i, index = get_index(ofs);
 	uint32_t *tp;
@@ -97,8 +98,9 @@ void cache_write(uint32_t ofs, void *buf, uint32_t size)
 void cache_read(uint32_t ofs, void *buf, uint32_t size)
 {
 	if (((ofs | (64 - 1)) != ((ofs + size - 1) | (64 - 1))))
-		printf("read cross boundary, ofs:%x size:%x\n", ofs, size);
-
+		// printf("read cross boundary, ofs:%x size:%x\n", ofs, size);
+		printf("read cross boundary, ofs:%lx size:%lx\n", (unsigned long)ofs, (unsigned long)size);
+		
 	int ti, i, index = get_index(ofs);
 	uint32_t *tp;
 	uint8_t *p;
