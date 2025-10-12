@@ -7,9 +7,10 @@
 #ifndef PORT_H
 #define PORT_H
 
+#include <stdint.h>
+
 uint64_t GetTimeMicroseconds();
 int IsKBHit();
 int ReadKBByte();
 int load_images(int ram_size, int *kern_len);
-
 #endif /* PORT_H */
