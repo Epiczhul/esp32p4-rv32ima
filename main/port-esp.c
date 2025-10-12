@@ -12,9 +12,9 @@
 #include "esp_attr.h"
 #include "esp_flash.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "esp_partition.h"
 #include "hal/usb_serial_jtag_ll.h"
-#include "driver/gpio.h"
-#include "driver/spi_master.h"
 #include "psram.h"
 
 uint64_t GetTimeMicroseconds()
@@ -40,256 +40,201 @@ int IsKBHit(void)
 	return usb_serial_jtag_ll_rxfifo_data_available();
 }
 
-#define GPIO_MOSI	7
-#define GPIO_MISO	2
-#define GPIO_CS		10
-#define GPIO_SCLK	6
-#define SPI_HOST_ID	1
-#define SPI_FREQ	80000000; // 80MHz
-
-#define CMD_WRITE	0x02
-#define CMD_READ	0x03
-#define CMD_FAST_READ	0x0b
-#define CMD_RESET_EN	0x66
-#define CMD_RESET	0x99
-#define CMD_READ_ID	0x9f
-
-static spi_device_handle_t handle;
-
-static esp_err_t psram_send_cmd(spi_device_handle_t h, const uint8_t cmd)
-{
-	spi_transaction_ext_t t = { };
-	t.base.flags = SPI_TRANS_VARIABLE_ADDR;
-	t.base.cmd = cmd;
-	t.base.length = 0;
-        t.command_bits = 8U;
-        t.address_bits = 0;
-
-	return spi_device_polling_transmit(h, (spi_transaction_t*)&t);
-}
-
-static esp_err_t psram_read_id(spi_device_handle_t h, uint8_t *rxdata)
-{
-	spi_transaction_t t = { };
-	t.cmd = CMD_READ_ID;
-	t.addr = 0;
-	t.rx_buffer = rxdata;
-	t.length = 6 * 8;
-	return spi_device_polling_transmit(h, &t);
-}
+static uint8_t *psram_base = NULL;
+static size_t psram_size = 0;
 
 int psram_init(void)
 {
-	esp_err_t ret;
-	uint8_t id[6];
+	size_t available_psram;
+	size_t alloc_size;
 
-	gpio_reset_pin(GPIO_CS);
-	gpio_set_direction(GPIO_CS, GPIO_MODE_OUTPUT);
-	gpio_set_level(GPIO_CS, 1);
+	available_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 
-	spi_bus_config_t spi_bus_config = {
-		.mosi_io_num = GPIO_MOSI,
-		.miso_io_num = GPIO_MISO,
-		.sclk_io_num = GPIO_SCLK,
-		.quadwp_io_num = -1,
-		.quadhd_io_num = -1,
-		.max_transfer_sz = 0,
-		.flags = 0,
-	};
-
-	printf("SPI_HOST_ID = %d\n", SPI_HOST_ID);
-	ret = spi_bus_initialize(SPI_HOST_ID, &spi_bus_config, SPI_DMA_CH_AUTO);
-	printf("spi_bus_initialize = %d\n", ret);
-	if (ret != ESP_OK)
+	if (available_psram == 0) {
+		printf("ERROR: No PSRAM available!\n");
+		printf("Check menuconfig: Component config -> ESP PSRAM\n");
 		return -1;
+	}
 
-	spi_device_interface_config_t devcfg;
-	memset(&devcfg, 0, sizeof(spi_device_interface_config_t));
-	devcfg.clock_speed_hz = SPI_FREQ;
-	devcfg.spics_io_num = -1;
-	devcfg.queue_size = 1;
-	devcfg.command_bits = 8;
-	devcfg.address_bits = 24;
+	printf("Available PSRAM: %zu bytes (%.2f MB)\n",
+		   available_psram, available_psram / (1024.0 * 1024.0));
 
-	ret = spi_bus_add_device(SPI_HOST_ID, &devcfg, &handle);
-	printf("spi_bus_add_device = %d\n", ret);
-	if (ret != ESP_OK)
+	alloc_size = (available_psram * 9) / 10;
+
+	printf("Attempting to allocate %zu bytes (%.2f MB)...\n",
+		   alloc_size, alloc_size / (1024.0 * 1024.0));
+
+	psram_base = (uint8_t *)heap_caps_malloc(alloc_size, MALLOC_CAP_SPIRAM);
+
+	if (psram_base == NULL) {
+		printf("ERROR: Failed to allocate PSRAM!\n");
 		return -1;
+	}
 
-	gpio_set_level(GPIO_CS, 1);
-	usleep(200);
+	psram_size = alloc_size;
+	printf("SUCCESS: PSRAM allocated at %p, size: %zu bytes (%.2f MB)\n",
+		   psram_base, psram_size, psram_size / (1024.0 * 1024.0));
 
-	gpio_set_level(GPIO_CS, 0);
-	psram_send_cmd(handle, CMD_RESET_EN);
-	psram_send_cmd(handle, CMD_RESET);
-	gpio_set_level(GPIO_CS, 1);
-	usleep(200);
+	printf("Initializing PSRAM to zero...\n");
+	memset(psram_base, 0, psram_size);
+	printf("PSRAM initialized successfully!\n");
 
-	gpio_set_level(GPIO_CS, 0);
-	ret = psram_read_id(handle, id);
-	gpio_set_level(GPIO_CS, 1);
-	if (ret != ESP_OK)
-		return -1;
-
-	printf("PSRAM ID: %02x%02x%02x%02x%02x%02x\n", id[0], id[1], id[2], id[3], id[4], id[5]);
 	return 0;
 }
 
 int psram_read(uint32_t addr, void *buf, int len)
 {
-	esp_err_t ret;
-	spi_transaction_ext_t t = { };
-
-	t.base.cmd = CMD_FAST_READ;
-	t.base.addr = addr;
-	t.base.rx_buffer = buf;
-	t.base.length = len * 8;
-	t.base.flags = SPI_TRANS_VARIABLE_DUMMY;
-	t.dummy_bits = 8;
-
-	gpio_set_level(GPIO_CS, 0);
-	ret = spi_device_polling_transmit(handle, (spi_transaction_t*)&t);
-	gpio_set_level(GPIO_CS, 1);
-
-	if (ret != ESP_OK) {
-		printf("psram_read failed %lx %d\n", addr, len);
+	if (psram_base == NULL) {
+		printf("ERROR: psram_read called before psram_init!\n");
 		return -1;
 	}
 
+	if (addr + len > psram_size) {
+		printf("ERROR: psram_read out of bounds: addr=0x%lx, len=%d, size=%zu\n",
+			   (unsigned long)addr, len, psram_size);
+		return -1;
+	}
+
+	memcpy(buf, psram_base + addr, len);
 	return len;
 }
 
 int psram_write(uint32_t addr, void *buf, int len)
 {
-	esp_err_t ret;
-	spi_transaction_t t = {};
-
-	t.cmd = CMD_WRITE;
-	t.addr = addr;
-	t.tx_buffer = buf;
-	t.length = len * 8;
-
-	gpio_set_level(GPIO_CS, 0);
-	ret = spi_device_polling_transmit(handle, &t);
-	gpio_set_level(GPIO_CS, 1);
-
-	if (ret != ESP_OK) {
-		printf("psram_write failed %lx %d\n", addr, len);
+	if (psram_base == NULL) {
+		printf("ERROR: psram_write called before psram_init!\n");
 		return -1;
 	}
 
+	if (addr + len > psram_size) {
+		printf("ERROR: psram_write out of bounds: addr=0x%lx, len=%d, size=%zu\n",
+			   (unsigned long)addr, len, psram_size);
+		return -1;
+	}
+
+	memcpy(psram_base + addr, buf, len);
 	return len;
 }
 
-#define kernel_start	0x200000
-#define kernel_end	0x363b8c
+void *psram_get_base(void)
+{
+	return psram_base;
+}
 
-static char dmabuf[64];
+size_t psram_get_size(void)
+{
+	return psram_size;
+}
+
+void verify_kernel_header(void)
+{
+	uint8_t header[64];
+
+	printf("\n=== Verifying Kernel Header ===\n");
+	psram_read(0, header, 64);
+
+	printf("First 64 bytes of loaded kernel:\n");
+	for (int i = 0; i < 64; i++) {
+		printf("%02x ", header[i]);
+		if ((i + 1) % 16 == 0) printf("\n");
+	}
+	printf("\n");
+
+	// Check RISC-V magic
+	if (header[0x30] == 'R' && header[0x31] == 'I' &&
+		header[0x32] == 'S' && header[0x33] == 'C' &&
+		header[0x34] == 'V') {
+		printf("✓ RISCV magic found at offset 0x30\n");
+		} else {
+			printf("✗ RISCV magic NOT found! Expected at 0x30\n");
+		}
+
+		uint32_t first_instr = *(uint32_t*)header;
+	printf("First instruction: 0x%08lx\n", (unsigned long)first_instr);
+	printf("Expected: 0x05c0006f (j 0x5c)\n\n");
+}
+
 int load_images(int ram_size, int *kern_len)
 {
-	long flen;
-	uint32_t addr, flashaddr;
+	const esp_partition_t *kernel_partition;
+	esp_err_t err;
+	uint32_t addr;
+	char dmabuf[64];
+	size_t partition_size;
 
-	flen = kernel_end - kernel_start;
-	if (flen > ram_size) {
-		printf("Error: Could not fit RAM image (%ld bytes) into %"PRIu32"\n", flen, ram_size);
+	printf("\n=== Loading Kernel from Flash ===\n");
+
+	kernel_partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+												ESP_PARTITION_SUBTYPE_ANY,
+											 "kernel");
+	if (kernel_partition == NULL) {
+		printf("ERROR: 'kernel' partition not found!\n");
+		printf("Make sure partition table has 'kernel' partition\n");
 		return -1;
 	}
+
+	partition_size = kernel_partition->size;
+	printf("Found kernel partition:\n");
+	printf("  Label: %s\n", kernel_partition->label);
+	printf("  Address: 0x%lx\n", (unsigned long)kernel_partition->address);
+	printf("  Size: %zu bytes (%.2f MB)\n", partition_size,
+		   partition_size / (1024.0 * 1024.0));
+
+	if (partition_size > ram_size) {
+		printf("WARNING: Partition size (%zu) > RAM size (%d)\n",
+			   partition_size, ram_size);
+		printf("Will only load first %d bytes\n", ram_size);
+		partition_size = ram_size;
+	}
+
+	if (partition_size > psram_get_size()) {
+		printf("WARNING: Partition size (%zu) > PSRAM size (%zu)\n",
+			   partition_size, psram_get_size());
+		partition_size = psram_get_size();
+	}
+
 	if (kern_len)
-		*kern_len = flen;
+		*kern_len = partition_size;
+
+	printf("\nLoading kernel from flash to PSRAM...\n");
+	printf("This will take a moment...\n");
 
 	addr = 0;
-	flashaddr = kernel_start;
-	printf("loading kernel Image (%ld bytes) from flash:%lx into psram:%lx\n", flen, flashaddr, addr);
-	while (flen >= 64) {
-		esp_flash_read(NULL, dmabuf, flashaddr, 64);
-		psram_write(handle, addr, dmabuf, 64);
+	size_t remaining = partition_size;
+
+	while (remaining >= 64) {
+		err = esp_partition_read(kernel_partition, addr, dmabuf, 64);
+		if (err != ESP_OK) {
+			printf("\nERROR: Failed to read from flash at offset %lu: %s\n",
+				   (unsigned long)addr, esp_err_to_name(err));
+			return -1;
+		}
+
+		psram_write(addr, dmabuf, 64);
 		addr += 64;
-		flashaddr += 64;
-		flen -= 64;
+		remaining -= 64;
+
+		if ((addr % (64 * 1024)) == 0) {
+			printf(".");
+			fflush(stdout);
+		}
 	}
-	if (flen) {
-		esp_flash_read(NULL, dmabuf, flashaddr, flen);
-		psram_write(handle, addr, dmabuf, flen);
+
+	if (remaining > 0) {
+		err = esp_partition_read(kernel_partition, addr, dmabuf, remaining);
+		if (err != ESP_OK) {
+			printf("\nERROR: Failed to read remaining bytes: %s\n",
+				   esp_err_to_name(err));
+			return -1;
+		}
+		psram_write(addr, dmabuf, remaining);
 	}
+
+	printf("\n✓ Kernel loaded successfully from flash!\n");
+	printf("Total loaded: %zu bytes (%.2f MB)\n",
+		   partition_size, partition_size / (1024.0 * 1024.0));
+
+	verify_kernel_header();
 
 	return 0;
 }
-
-#if 0
-static void psram_test(void)
-{
-	int i;
-	uint32_t addr;
-	uint64_t t1;
-	uint8_t testbuf[64];
-
-	printf("Writing PSRAM...\n");
-	fflush(stdout);
-	for (addr = 0; addr < 8 * 1024 * 1024; ++addr) {
-		uint8_t data = addr & 0xff;
-		psram_write(handle, addr, &data, 1);
-	}
-
-	printf("Reading PSRAM...\n");
-	fflush(stdout);
-	for (addr = 0; addr < 8 * 1024 * 1024; ++addr) {
-		uint8_t data, expected;
-
-		expected = addr & 0xff;
-		psram_read(handle, addr, &data, 1);
-		if (data != expected)
-			printf("PSRAM 8bit read failed at %lx (%x != %x)\n", addr, data, expected);
-	}
-	printf("PSRAM 8bit read pass.\n");
-	fflush(stdout);
-
-	for (addr = 0; addr < 8 * 1024 * 1024; addr += 2) {
-		uint16_t data, expected;
-		expected = (((addr + 1) & 0xff) << 8) |
-			   (addr & 0xff);
-		psram_read(handle, addr, &data, 2);
-		if (data != expected)
-			printf("PSRAM 16bit read failed at %lx (%x != %x)\n", addr, data, expected);
-	}
-	printf("PSRAM 16bit read pass.\n");
-	fflush(stdout);
-
-	for (addr = 0; addr < 8 * 1024 * 1024; addr += 4) {
-		uint32_t data, expected;
-		expected = (((addr + 3) & 0xff) << 24) |
-			   (((addr + 2) & 0xff) << 16) |
-			   (((addr + 1) & 0xff) << 8) |
-			   (addr & 0xff);
-		psram_read(handle, addr, &data, 4);
-		if (data != expected)
-			printf("PSRAM 32bit read failed at %lx (%lx != %lx)\n", addr, data, expected);
-	}
-	printf("PSRAM 32bit read pass.\n");
-	fflush(stdout);
-
-	memset(testbuf, 0x5a, sizeof(testbuf));
-	t1 = esp_timer_get_time();
-	for (i = 0; i < 10000; ++i) {
-		psram_write(handle, i * 64, &testbuf, 64);
-	}
-	t1 = esp_timer_get_time() - t1;
-	t1 /= 1000;
-	printf("PSRAM write speed: %lld B/s.\n", 64 * 10000 * 1000 / t1);
-	fflush(stdout);
-
-	t1 = esp_timer_get_time();
-	for (i = 0; i < 10000; ++i) {
-		psram_read(handle, i * 64, &testbuf, 64);
-	}
-	t1 = esp_timer_get_time() - t1;
-	t1 /= 1000;
-	printf("PSRAM read speed: %lld B/s.\n", 64 * 10000 * 1000 / t1);
-	fflush(stdout);
-
-	for (;;) {
-		printf("PSRAM test done\n");
-		usleep(1000000);
-	}
-}
-#endif
