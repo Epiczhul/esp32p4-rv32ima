@@ -1,7 +1,17 @@
 # Name,   Type, SubType, Offset,  Size, Flags
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
+# ESP32-P4 has 16MB flash, layout:
+# 0x0      - 0x2000   : Second stage bootloader (8KB)
+# 0x2000   - 0x9000   : Partition table (28KB)
+# 0x9000   - 0xf000   : NVS (24KB)
+# 0xf000   - 0x10000  : PHY init (4KB)
+# 0x10000  - 0x110000 : Application (1MB)
+# 0x110000 - 0xF10000 : Kernel Image (14MB)
+# 0xF10000 - 0xF20000 : DTB (64KB)
+# 0xF20000 - 0x1000000: Reserved (896KB)
+
 nvs,      data, nvs,     0x9000,    0x6000,
 phy_init, data, phy,     0xf000,    0x1000,
 factory,  app,  factory, 0x10000,   1M,
-kernel,   data, 0x58,    0x200000,  0x1ff000,
-dtb,      data, 0x58,    0x3ff000,  0x1000,
+kernel,   data, 0x58,    0x110000,  14M,
+dtb,      data, 0x58,    0xF10000,  0x10000,
