@@ -1,4 +1,4 @@
-# uc-rv32ima
+# esp32p4-rv32ima
 Run linux on various MCUs with the help of RISC-V emulator. This project uses [CNLohr's mini-rv32ima](https://github.com/cnlohr/mini-rv32ima) RISC-V emulator core to run Linux on various MCUs such as ESP32P4. Although, only ESP32P4 is tested now.
 
 ## Why
