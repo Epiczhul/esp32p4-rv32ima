@@ -11,6 +11,6 @@
 
 void cache_write(uint32_t ofs, void *buf, uint32_t size);
 void cache_read(uint32_t ofs, void *buf, uint32_t size);
-void cache_get_stat(uint32_t *phit, uint64_t *paccessed);
+void cache_get_stat(uint64_t *phit, uint64_t *paccessed);
 
 #endif /* CACHE_H */
