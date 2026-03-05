@@ -295,7 +295,7 @@ static uint32_t HandleException(uint32_t ir, uint32_t code)
 }
 static uint8_t uart_scratch = 0;
 static uint8_t uart_ier = 0;
-tatic uint16_t uart_divisor = 0;
+static uint16_t uart_divisor = 0;
 static uint8_t uart_lcr = 0;
 static uint8_t uart_mcr = 0;
 static uint8_t uart_fcr = 0;
