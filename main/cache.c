@@ -29,7 +29,7 @@ static struct cacheline cachelines[CACHESIZE/64/2][2];
  */
 #define VALID		(1 << 0)
 #define DIRTY		(1 << 1)
-#define LRU		(1 << 2)
+#define LRU			(1 << 2)
 #define LRU_SFT		2
 #define TAG_MSK		0xfffff800
 
@@ -43,15 +43,23 @@ static inline int get_index(uint32_t addr)
 	return (addr >> 6) & 0x1f;
 }
 
+
+void cache_write(uint32_t ofs, void *buf, uint32_t size);
+void cache_read(uint32_t ofs, void *buf, uint32_t size);
+
 void cache_write(uint32_t ofs, void *buf, uint32_t size)
 {
-	if (((ofs | (64 - 1)) != ((ofs + size - 1) | (64 - 1))))
-		// printf("write cross boundary, ofs:%x size:%x\n", ofs, size);
-		printf("write cross boundary, ofs:%lx size:%lx\n", (unsigned long)ofs, (unsigned long)size);
 
-	int ti, i, index = get_index(ofs);
-	uint32_t *tp;
-	uint8_t *p;
+	if ((ofs & ~0x3f) != ((ofs + size - 1) & ~0x3f)) {
+		uint32_t first = 64 - (ofs & 0x3f);
+		cache_write(ofs, buf, first);
+		cache_write((ofs + first), (uint8_t *)buf + first, size - first);
+		return;
+	}
+
+	int ti = 0, i, index = get_index(ofs);
+	uint32_t *tp = &tags[index][0];
+	uint8_t *p = cachelines[index][0].data;
 
 	++accessed;
 
@@ -60,6 +68,7 @@ void cache_write(uint32_t ofs, void *buf, uint32_t size)
 		p = cachelines[index][i].data;
 		if (*tp & VALID) {
 			if ((*tp & TAG_MSK) == (ofs & TAG_MSK)) {
+				
 				++hit;
 				ti = i;
 				break;
@@ -71,9 +80,9 @@ void cache_write(uint32_t ofs, void *buf, uint32_t size)
 				tp = &tags[index][ti];
 				p = cachelines[index][ti].data;
 
-				if (*tp & DIRTY) {
+				if (*tp & DIRTY)
 					psram_write(*tp & ~0x3f, p, 64);
-				}
+
 				psram_read(ofs & ~0x3f, p, 64);
 				*tp = ofs & ~0x3f;
 				*tp |= VALID;
@@ -82,6 +91,7 @@ void cache_write(uint32_t ofs, void *buf, uint32_t size)
 			if (i != 1)
 				continue;
 
+
 			ti = i;
 			psram_read(ofs & ~0x3f, p, 64);
 			*tp = ofs & ~0x3f;
@@ -89,21 +99,28 @@ void cache_write(uint32_t ofs, void *buf, uint32_t size)
 		}
 	}
 
-	tags[index][1] &= ~(LRU);
+
+	tags[index][1] &= ~LRU;
 	tags[index][1] |= (ti << LRU_SFT);
+
+	tp = &tags[index][ti];
+	p = cachelines[index][ti].data;
 	memcpy(p + (ofs & 0x3f), buf, size);
 	*tp |= DIRTY;
 }
 
 void cache_read(uint32_t ofs, void *buf, uint32_t size)
 {
-	if (((ofs | (64 - 1)) != ((ofs + size - 1) | (64 - 1))))
-		// printf("read cross boundary, ofs:%x size:%x\n", ofs, size);
-		printf("read cross boundary, ofs:%lx size:%lx\n", (unsigned long)ofs, (unsigned long)size);
-		
-	int ti, i, index = get_index(ofs);
-	uint32_t *tp;
-	uint8_t *p;
+	if ((ofs & ~0x3f) != ((ofs + size - 1) & ~0x3f)) {
+		uint32_t first = 64 - (ofs & 0x3f);
+		cache_read(ofs, buf, first);
+		cache_read((ofs + first), (uint8_t *)buf + first, size - first);
+		return;
+	}
+
+	int ti = 0, i, index = get_index(ofs);
+	uint32_t *tp = &tags[index][0];
+	uint8_t *p = cachelines[index][0].data;
 
 	++accessed;
 
@@ -112,20 +129,21 @@ void cache_read(uint32_t ofs, void *buf, uint32_t size)
 		p = cachelines[index][i].data;
 		if (*tp & VALID) {
 			if ((*tp & TAG_MSK) == (ofs & TAG_MSK)) {
+				
 				++hit;
 				ti = i;
 				break;
 			} else {
 				if (i != 1)
 					continue;
-
+				
 				ti = 1 - ((*tp & LRU) >> LRU_SFT);
 				tp = &tags[index][ti];
 				p = cachelines[index][ti].data;
 
-				if (*tp & DIRTY) {
+				if (*tp & DIRTY)
 					psram_write(*tp & ~0x3f, p, 64);
-				}
+
 				psram_read(ofs & ~0x3f, p, 64);
 				*tp = ofs & ~0x3f;
 				*tp |= VALID;
@@ -141,8 +159,11 @@ void cache_read(uint32_t ofs, void *buf, uint32_t size)
 		}
 	}
 
-	tags[index][1] &= ~(LRU);
+	tags[index][1] &= ~LRU;
 	tags[index][1] |= (ti << LRU_SFT);
+
+
+	p = cachelines[index][ti].data;
 	memcpy(buf, p + (ofs & 0x3f), size);
 }
 
