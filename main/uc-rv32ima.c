@@ -136,6 +136,7 @@ struct MiniRV32IMAState core;
 
 void app_main(void)
 {
+	setvbuf(stdout, NULL, _IONBF, 0);
 	printf("psram init\n");
 
 	if (psram_init() < 0) {
