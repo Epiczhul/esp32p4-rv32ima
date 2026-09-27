@@ -1,0 +1,38 @@
+menu "RV32IMA emulator"
+
+	config EMU_RAM_MB
+		int "Guest RAM size in MB"
+		default 16
+		range 4 32
+		help
+			Size of the guest RAM carved out of PSRAM. Must match the
+			memory node in the DTB you flash (uc-sv32.dts uses 16MB).
+
+	config EMU_BOOT_SMODE
+		bool "Boot the kernel in S-mode (Sv32 MMU Linux)"
+		default y
+		help
+			Required for MMU Linux kernels (generic riscv 6.6+ built
+			with CONFIG_MMU). The emulator then acts as the machine
+			level firmware: Sv32 translation, SBI 0.2 (BASE + TIME +
+			legacy console), mideleg/medeleg delegation and a PLIC for
+			the uart rx interrupt. Disable it to boot the old NOMMU
+			M-mode kernel image.
+
+	config EMU_SOFTWARE_CACHE
+		bool "Software write-back cache in front of PSRAM"
+		default n
+		help
+			The old 4KB two way cache layer. On the ESP32-P4 the PSRAM
+			is already hardware cached, so direct access is faster.
+			Only enable this for experiments.
+
+	config EMU_CONSOLE_UART0
+		bool "Read console input from UART0"
+		default y
+
+	config EMU_CONSOLE_USB_JTAG
+		bool "Read console input from USB serial JTAG"
+		default y
+
+endmenu

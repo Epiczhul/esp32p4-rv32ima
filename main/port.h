@@ -13,4 +13,7 @@ uint64_t GetTimeMicroseconds();
 int IsKBHit();
 int ReadKBByte();
 int load_images(int ram_size, int *kern_len);
+uint32_t load_dtb(uint32_t ram_size);
+int console_read_bytes(uint8_t *buf, int len);
+void console_write(const char *buf, int len);
 #endif /* PORT_H */

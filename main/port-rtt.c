@@ -105,6 +105,31 @@ int IsKBHit(void)
 
 static struct rt_spi_device *spi_dev;
 
+int console_read_bytes(uint8_t *buf, int len)
+{
+	int n = 0;
+
+	while (n < len && IsKBHit()) {
+		int c = ReadKBByte();
+
+		if (c < 0)
+			break;
+		buf[n++] = c;
+	}
+	return n;
+}
+
+void console_write(const char *buf, int len)
+{
+	fwrite(buf, 1, len, stdout);
+}
+
+uint32_t load_dtb(uint32_t ram_size)
+{
+	// no dtb partition on this port, kernel uses its builtin dtb
+	return 0;
+}
+
 static void psram_send_cmd(struct rt_spi_device *h, const uint8_t cmd)
 {
 	struct rt_spi_message msg = { };

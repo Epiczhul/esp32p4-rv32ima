@@ -62,6 +62,22 @@
 	#define MINIRV32_LOAD1( ofs ) *(uint8_t*)(image + ofs)
 #endif
 
+#ifndef MINIRV32_MISA_VALUE
+	#define MINIRV32_MISA_VALUE 0x40401101
+#endif
+
+#ifndef MINIRV32_TLB_ENTRIES
+	#define MINIRV32_TLB_ENTRIES 64
+#endif
+
+#ifndef MINIRV32_EXT_IRQ_PENDING
+	#define MINIRV32_EXT_IRQ_PENDING( state ) 0
+#endif
+
+#ifndef MINIRV32_SBI_ECALL
+	#define MINIRV32_SBI_ECALL( state )
+#endif
+
 // As a note: We quouple-ify these, because in HLSL, we will be operating with
 // uint4's.  We are going to uint4 data to/from system RAM.
 //
@@ -94,6 +110,19 @@ struct MiniRV32IMAState
 	// Bit 2 = WFI (Wait for interrupt)
 	// Bit 3+ = Load/Store reservation LSBs.
 	uint32_t extraflags;
+
+	// Delegation + supervisor CSRs.  Only used when the kernel runs in
+	// S-mode, the M-mode boot path leaves them alone.
+	uint32_t mideleg;
+	uint32_t medeleg;
+	uint32_t satp;
+	uint32_t stvec;
+	uint32_t sepc;
+	uint32_t scause;
+	uint32_t stval;
+	uint32_t sscratch;
+	uint32_t sie;
+	uint32_t sip;
 };
 
 MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint8_t * image, uint32_t vProcAddress, uint32_t elapsedUs, int count );
@@ -104,6 +133,114 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 #define SETCSR( x, val ) { state->x = val; }
 #define REG( x ) state->regs[x]
 #define REGSET( x, val ) { state->regs[x] = val; }
+
+// Sv32 translation state, one TLB per access class.
+static uint32_t tlb_tag[3][MINIRV32_TLB_ENTRIES];
+static uint32_t tlb_base[3][MINIRV32_TLB_ENTRIES];
+
+static void MiniRV32IMATLBFlush(void)
+{
+	memset( tlb_tag, 0, sizeof( tlb_tag ) );
+}
+
+// Translate a virtual address.  access: 0 = fetch, 1 = load, 2 = store/AMO.
+// Returns the physical address, *trap carries the trap code on a fault.
+// M-mode and satp mode = bare pass through unchanged.
+static uint32_t MiniRV32IMATranslate( struct MiniRV32IMAState * state, uint8_t * image, uint32_t vaddr, int access, uint32_t * trap )
+{
+	(void) image;
+
+	uint32_t mode = CSR( extraflags ) & 3;
+
+	// MPRV reroutes data accesses in M-mode through MPP's translation.
+	if( access != 0 && mode == 3 && ( CSR( mstatus ) & (1<<17) ) )
+		mode = ( CSR( mstatus ) >> 11 ) & 3;
+
+	if( mode == 3 || !( CSR( satp ) >> 31 ) )
+		return vaddr;
+
+	uint32_t vpn = vaddr >> 12;
+	uint32_t idx = vpn & ( MINIRV32_TLB_ENTRIES - 1 );
+	if( tlb_tag[access][idx] == (( vpn << 1 ) | 1) )
+		return tlb_base[access][idx] | ( vaddr & 0xfff );
+
+	// Slow path: walk the two-level Sv32 tables.
+	uint32_t pte_addr = ( CSR( satp ) & 0x3fffff ) << 12;
+	pte_addr += ( vaddr >> 22 ) << 2;
+	uint32_t is_super = 0;
+	uint32_t pte = 0;
+	uint32_t pte_ofs = 0;
+
+	for( int level = 0; level < 2; level++ )
+	{
+		pte_ofs = pte_addr - MINIRV32_RAM_IMAGE_OFFSET;
+		if( pte_ofs >= MINI_RV32_RAM_SIZE - 3 )
+			goto fault;
+		pte = MINIRV32_LOAD4( pte_ofs );
+
+		if( !( pte & 0x01 ) ) // V
+			goto fault;
+
+		if( pte & 0x0e ) // R|W|X, this one is a leaf.
+		{
+			is_super = !level;
+			break;
+		}
+
+		if( level == 1 ) // Non-leaf at the last level.
+			goto fault;
+
+		pte_addr = (( pte >> 10 ) << 12) | (( ( vaddr >> 12 ) & 0x3ff ) << 2);
+	}
+
+	if( is_super && ( pte & 0xffc00 ) ) // Misaligned superpage, ppn[0] must be zero.
+		goto fault;
+
+	// Permission checks, SUM and MXR included.
+	uint32_t mstatus = CSR( mstatus );
+	if( access == 0 )
+	{
+		if( !( pte & 0x08 ) ) goto fault; // X
+	}
+	else if( access == 1 )
+	{
+		if( !( ( pte & 0x02 ) || ( ( mstatus & (1<<19) ) && ( pte & 0x08 ) ) ) ) goto fault; // R, or X with MXR
+	}
+	else
+	{
+		if( !( ( pte & 0x02 ) && ( pte & 0x04 ) ) ) goto fault; // R+W
+	}
+	if( mode == 0 )
+	{
+		if( !( pte & 0x10 ) ) goto fault; // U pages are only reachable from U-mode.
+	}
+	else
+	{
+		if( ( pte & 0x10 ) && !( mstatus & (1<<18) ) ) goto fault; // SUM for U pages in S-mode.
+	}
+
+	// Hardware-managed A/D bits, written back into the PTE.
+	if( !( pte & 0x40 ) || ( access == 2 && !( pte & 0x80 ) ) )
+	{
+		pte |= 0x40;
+		if( access == 2 ) pte |= 0x80;
+		MINIRV32_STORE4( pte_ofs, pte );
+	}
+
+	uint32_t paddr;
+	if( is_super )
+		paddr = (( pte & 0xfff00000 ) << 2) | ( vaddr & 0x3fffff );
+	else
+		paddr = (( pte >> 10 ) << 12) | ( vaddr & 0xfff );
+
+	tlb_tag[access][idx] = ( vpn << 1 ) | 1;
+	tlb_base[access][idx] = paddr & ~0xfff;
+	return paddr;
+
+fault:
+	*trap = ( access == 0 ) ? (12+1) : ( access == 1 ) ? (13+1) : (15+1);
+	return 0;
+}
 
 MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint8_t * image, uint32_t vProcAddress, uint32_t elapsedUs, int count )
 {
@@ -116,9 +253,41 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 	{
 		CSR( extraflags ) &= ~4; // Clear WFI
 		CSR( mip ) |= 1<<7; //MTIP of MIP // https://stackoverflow.com/a/61916199/2926815  Fire interrupt.
+		CSR( mip ) |= 1<<5; //STIP, the S-mode view of the same timer.
 	}
 	else
+	{
 		CSR( mip ) &= ~(1<<7);
+		CSR( mip ) &= ~(1<<5);
+	}
+
+	// SEIP comes from the PLIC, if one is wired up.
+	if( MINIRV32_EXT_IRQ_PENDING( state ) )
+		CSR( mip ) |= 1<<9;
+	else
+		CSR( mip ) &= ~(1<<9);
+
+	// Pick a deliverable interrupt.  MTIP always stays in M-mode,
+	// STIP/SEIP only reach S-mode when delegated via mideleg.
+	uint32_t minterrupt = 0;
+	uint32_t privmode = CSR( extraflags ) & 3;
+	if( ( CSR( mip ) & (1<<7) ) && ( CSR( mie ) & (1<<7) /*mtie*/ ) && ( CSR( mstatus ) & 0x8 /*mie*/) )
+	{
+		minterrupt = 0x80000007;
+	}
+	else if( privmode != 3 )
+	{
+		// S-mode interrupts are taken from U-mode, or from S-mode with SIE.
+		uint32_t sienable = ( privmode == 0 ) || ( CSR( mstatus ) & 0x2 /*sie*/ );
+		if( sienable && ( CSR( mip ) & (1<<9) ) && ( CSR( sie ) & (1<<9) ) && ( CSR( mideleg ) & (1<<9) ) )
+			minterrupt = 0x80000009;
+		else if( sienable && ( CSR( mip ) & (1<<5) ) && ( CSR( sie ) & (1<<5) ) && ( CSR( mideleg ) & (1<<5) ) )
+			minterrupt = 0x80000005;
+	}
+
+	// A deliverable interrupt also ends WFI.
+	if( minterrupt )
+		CSR( extraflags ) &= ~4;
 
 	// If WFI, don't run processor.
 	if( CSR( extraflags ) & 4 )
@@ -129,19 +298,23 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 	uint32_t pc = CSR( pc );
 	uint32_t cycle = CSR( cyclel );
 
-	if( ( CSR( mip ) & (1<<7) ) && ( CSR( mie ) & (1<<7) /*mtie*/ ) && ( CSR( mstatus ) & 0x8 /*mie*/) )
+	if( minterrupt )
 	{
-		// Timer interrupt.
-		trap = 0x80000007;
+		// Interrupt waiting to be delivered.
+		trap = minterrupt;
 		pc -= 4;
 	}
-	else // No timer interrupt?  Execute a bunch of instructions.
+	else // No interrupt?  Execute a bunch of instructions.
 	for( int icount = 0; icount < count; icount++ )
 	{
 		uint32_t ir = 0;
 		rval = 0;
 		cycle++;
-		uint32_t ofs_pc = pc - MINIRV32_RAM_IMAGE_OFFSET;
+		uint32_t ppc = MiniRV32IMATranslate( state, image, pc, 0, &trap );
+		if( trap )  // Instruction page fault, mtval becomes pc.
+			break;
+
+		uint32_t ofs_pc = ppc - MINIRV32_RAM_IMAGE_OFFSET;
 
 		if( ofs_pc  >= MINI_RV32_RAM_SIZE )
 		{
@@ -210,11 +383,18 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 					int32_t imm_se = imm | (( imm & 0x800 )?0xfffff000:0);
 					uint32_t rsval = rs1 + imm_se;
 
-					rsval -= MINIRV32_RAM_IMAGE_OFFSET;
+					uint32_t paddr = MiniRV32IMATranslate( state, image, rsval, 1, &trap );
+					if( trap )
+					{
+						rval = rsval; // Faulting address for mtval.
+						break;
+					}
+
+					rsval = paddr - MINIRV32_RAM_IMAGE_OFFSET;
 					if( rsval >= MINI_RV32_RAM_SIZE-3 )
 					{
 						rsval += MINIRV32_RAM_IMAGE_OFFSET;
-						if( rsval >= 0x10000000 && rsval < 0x12000000 )  // UART, CLNT
+						if( rsval >= 0x0C000000 && rsval < 0x12000000 )  // UART, CLNT, PLIC
 						{
 							if( rsval == 0x1100bffc ) // https://chromitem-soc.readthedocs.io/en/latest/clint.html
 								rval = CSR( timerh );
@@ -226,7 +406,7 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 						else
 						{
 							trap = (5+1);
-							rval = rsval;
+							rval = paddr;
 						}
 					}
 					else
@@ -250,13 +430,21 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 					uint32_t rs2 = REG((ir >> 20) & 0x1f);
 					uint32_t addy = ( ( ir >> 7 ) & 0x1f ) | ( ( ir & 0xfe000000 ) >> 20 );
 					if( addy & 0x800 ) addy |= 0xfffff000;
-					addy += rs1 - MINIRV32_RAM_IMAGE_OFFSET;
+					addy += rs1;
 					rdid = 0;
 
+					uint32_t paddr = MiniRV32IMATranslate( state, image, addy, 2, &trap );
+					if( trap )
+					{
+						rval = addy; // Faulting address for mtval.
+						break;
+					}
+
+					addy = paddr - MINIRV32_RAM_IMAGE_OFFSET;
 					if( addy >= MINI_RV32_RAM_SIZE-3 )
 					{
 						addy += MINIRV32_RAM_IMAGE_OFFSET;
-						if( addy >= 0x10000000 && addy < 0x12000000 )
+						if( addy >= 0x0C000000 && addy < 0x12000000 )
 						{
 							// Should be stuff like SYSCON, 8250, CLNT
 							if( addy == 0x11004004 ) //CLNT
@@ -274,7 +462,7 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 						else
 						{
 							trap = (7+1); // Store access fault.
-							rval = addy;
+							rval = paddr;
 						}
 					}
 					else
@@ -355,8 +543,22 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 						case 0x300: rval = CSR( mstatus ); break; //mstatus
 						case 0x342: rval = CSR( mcause ); break;
 						case 0x343: rval = CSR( mtval ); break;
+						case 0x100: rval = CSR( mstatus ) & 0xc0122; break; //sstatus
+						case 0x104: rval = CSR( sie ); break;
+						case 0x105: rval = CSR( stvec ); break;
+						case 0x106: break; //scounteren, no performance counters
+						case 0x140: rval = CSR( sscratch ); break;
+						case 0x141: rval = CSR( sepc ); break;
+						case 0x142: rval = CSR( scause ); break;
+						case 0x143: rval = CSR( stval ); break;
+						case 0x144: rval = CSR( sip ); break;
+						case 0x180: rval = CSR( satp ); break;
+						case 0x302: rval = CSR( medeleg ); break;
+						case 0x303: rval = CSR( mideleg ); break;
+						case 0xC01: rval = CSR( timerl ); break; //time
+						case 0xC81: rval = CSR( timerh ); break; //timeh
 						case 0xf11: rval = 0xff0ff0ff; break; //mvendorid
-						case 0x301: rval = 0x40401101; break; //misa (XLEN=32, IMA+X)
+						case 0x301: rval = MINIRV32_MISA_VALUE; break; //misa (XLEN=32, IMA+X)
 						//case 0x3B0: rval = 0; break; //pmpaddr0
 						//case 0x3a0: rval = 0; break; //pmpcfg0
 						//case 0xf12: rval = 0x00000000; break; //marchid
@@ -384,9 +586,25 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 						case 0x304: SETCSR( mie, writeval ); break;
 						case 0x344: SETCSR( mip, writeval ); break;
 						case 0x341: SETCSR( mepc, writeval ); break;
-						case 0x300: SETCSR( mstatus, writeval ); break; //mstatus
+						case 0x300: SETCSR( mstatus, writeval ); MiniRV32IMATLBFlush(); break; //mstatus
 						case 0x342: SETCSR( mcause, writeval ); break;
 						case 0x343: SETCSR( mtval, writeval ); break;
+						case 0x100: //sstatus, only the S-mode view is writable
+							SETCSR( mstatus, ( CSR( mstatus ) & ~0xc0122 ) | ( writeval & 0xc0122 ) );
+							MiniRV32IMATLBFlush(); // SUM/MXR affect translations.
+							break;
+						case 0x104: SETCSR( sie, writeval ); break;
+						case 0x105: SETCSR( stvec, writeval ); break;
+						case 0x106: break; //scounteren, WARL zero
+						case 0x140: SETCSR( sscratch, writeval ); break;
+						case 0x141: SETCSR( sepc, writeval ); break;
+						case 0x142: SETCSR( scause, writeval ); break;
+						case 0x143: SETCSR( stval, writeval ); break;
+						case 0x144: SETCSR( sip, writeval ); break;
+						case 0x180: SETCSR( satp, writeval ); MiniRV32IMATLBFlush(); break;
+						case 0x301: break; //misa, WARL
+						case 0x302: SETCSR( medeleg, writeval ); break;
+						case 0x303: SETCSR( mideleg, writeval ); break;
 						//case 0x3a0: break; //pmpcfg0
 						//case 0x3B0: break; //pmpaddr0
 						//case 0xf11: break; //mvendorid
@@ -409,7 +627,7 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 							SETCSR( pc, pc + 4 );
 							return 1;
 						}
-						else if( ( ( csrno & 0xff ) == 0x02 ) )  // MRET
+						else if( ( ( csrno & 0xff ) == 0x02 ) && csrno != 0x102 )  // MRET
 						{
 							//https://raw.githubusercontent.com/riscv/virtual-memory/main/specs/663-Svpbmt.pdf
 							//Table 7.6. MRET then in mstatus/mstatush sets MPV=0, MPP=0, MIE=MPIE, and MPIE=1. La
@@ -420,11 +638,35 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 							SETCSR( extraflags, (startextraflags & ~3) | ((startmstatus >> 11) & 3) );
 							pc = CSR( mepc ) -4;
 						}
+						else if( csrno == 0x102 ) // SRET
+						{
+							// sstatus: SIE = SPIE, SPIE = 1, SPP = 0, privilege from SPP.
+							uint32_t startmstatus = CSR( mstatus );
+							uint32_t startextraflags = CSR( extraflags );
+							SETCSR( mstatus, ( startmstatus & ~0x122 ) | (( startmstatus & 0x20 ) >> 4) | 0x20 );
+							SETCSR( extraflags, ( startextraflags & ~3 ) | (( startmstatus >> 8 ) & 1) );
+							pc = CSR( sepc ) - 4;
+						}
+						else if( ( csrno & 0xfff8 ) == 0x120 ) // SFENCE.VMA, funct7 0x09 << 5
+						{
+							MiniRV32IMATLBFlush();
+						}
 						else
 						{
 							switch( csrno )
 							{
-							case 0: trap = ( CSR( extraflags ) & 3) ? (11+1) : (8+1); break; // ECALL; 8 = "Environment call from U-mode"; 11 = "Environment call from M-mode"
+							case 0: // ECALL
+								if( ( CSR( extraflags ) & 3 ) == 3 )
+									trap = (11+1); // "Environment call from M-mode"
+								else if( ( CSR( extraflags ) & 3 ) == 1 )
+								{
+									// S-mode ecall is an SBI call, no trap,
+									// the firmware here answers it inline.
+									MINIRV32_SBI_ECALL( state );
+								}
+								else
+									trap = (8+1); // "Environment call from U-mode"
+								break;
 							case 1:	trap = (3+1); break; // EBREAK 3 = "Breakpoint"
 							default: trap = (2+1); break; // Illegal opcode.
 							}
@@ -440,14 +682,21 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 					uint32_t rs2 = REG((ir >> 20) & 0x1f);
 					uint32_t irmid = ( ir>>27 ) & 0x1f;
 
-					rs1 -= MINIRV32_RAM_IMAGE_OFFSET;
+					uint32_t paddr = MiniRV32IMATranslate( state, image, rs1, 2, &trap );
+					if( trap )
+					{
+						rval = rs1; // Faulting address for mtval.
+						break;
+					}
+
+					rs1 = paddr - MINIRV32_RAM_IMAGE_OFFSET;
 
 					// We don't implement load/store from UART or CLNT with RV32A here.
 
 					if( rs1 >= MINI_RV32_RAM_SIZE-3 )
 					{
 						trap = (7+1); //Store/AMO access fault
-						rval = rs1 + MINIRV32_RAM_IMAGE_OFFSET;
+						rval = paddr;
 					}
 					else
 					{
@@ -501,28 +750,60 @@ MINIRV32_DECORATE int32_t MiniRV32IMAStep( struct MiniRV32IMAState * state, uint
 	// Handle traps and interrupts.
 	if( trap )
 	{
-		if( trap & 0x80000000 ) // If prefixed with 1 in MSB, it's an interrupt, not a trap.
+		uint32_t cause = ( trap & 0x80000000 ) ? trap : ( trap - 1 );
+		uint32_t delegated = 0;
+
+		// Delegate to S-mode when the trap is covered by medeleg/mideleg
+		// and we aren't already in M-mode.  STIP/SEIP are only injected
+		// when delegated, MTIP never is.
+		if( ( CSR( extraflags ) & 3 ) != 3 )
 		{
-			SETCSR( mcause, trap );
-			SETCSR( mtval, 0 );
-			pc += 4; // PC needs to point to where the PC will return to.
+			if( trap & 0x80000000 )
+				delegated = ( CSR( mideleg ) >> ( trap & 0x1f ) ) & 1;
+			else if( cause < 32 )
+				delegated = ( CSR( medeleg ) >> cause ) & 1;
+		}
+
+		if( delegated )
+		{
+			// Trap into S-mode.
+			uint32_t startmstatus = CSR( mstatus );
+			uint32_t startextraflags = CSR( extraflags );
+			SETCSR( sepc, pc + ( ( trap & 0x80000000 ) ? 4 : 0 ) );
+			SETCSR( scause, cause );
+			SETCSR( stval, ( trap & 0x80000000 ) ? 0 : ( ( ( trap > 5 && trap <= 8 ) || ( trap >= 14 && trap <= 16 ) ) ? rval : pc ) );
+			SETCSR( mstatus, ( startmstatus & ~0x122 ) | (( startextraflags & 1 ) << 8) | ((( startmstatus & 0x2 ) != 0) << 5) );
+			SETCSR( extraflags, ( startextraflags & ~3 ) | 1 );
+			pc = (CSR( stvec ) - 4);
+
+			trap = 0;
+			pc += 4;
 		}
 		else
 		{
-			SETCSR( mcause,  trap - 1 );
-			SETCSR( mtval, (trap > 5 && trap <= 8)? rval : pc );
+			if( trap & 0x80000000 ) // If prefixed with 1 in MSB, it's an interrupt, not a trap.
+			{
+				SETCSR( mcause, trap );
+				SETCSR( mtval, 0 );
+				pc += 4; // PC needs to point to where the PC will return to.
+			}
+			else
+			{
+				SETCSR( mcause,  trap - 1 );
+				SETCSR( mtval, (trap > 5 && trap <= 8)? rval : pc );
+			}
+			SETCSR( mepc, pc ); //TRICKY: The kernel advances mepc automatically.
+			//CSR( mstatus ) & 8 = MIE, & 0x80 = MPIE
+			// On an interrupt, the system moves current MIE into MPIE
+			SETCSR( mstatus, (( CSR( mstatus ) & 0x08) << 4) | (( CSR( extraflags ) & 3 ) << 11) );
+			pc = (CSR( mtvec ) - 4);
+
+			// If trapping, always enter machine mode.
+			CSR( extraflags ) |= 3;
+
+			trap = 0;
+			pc += 4;
 		}
-		SETCSR( mepc, pc ); //TRICKY: The kernel advances mepc automatically.
-		//CSR( mstatus ) & 8 = MIE, & 0x80 = MPIE
-		// On an interrupt, the system moves current MIE into MPIE
-		SETCSR( mstatus, (( CSR( mstatus ) & 0x08) << 4) | (( CSR( extraflags ) & 3 ) << 11) );
-		pc = (CSR( mtvec ) - 4);
-
-		// If trapping, always enter machine mode.
-		CSR( extraflags ) |= 3;
-
-		trap = 0;
-		pc += 4;
 	}
 
 	if( CSR( cyclel ) > cycle ) CSR( cycleh )++;
