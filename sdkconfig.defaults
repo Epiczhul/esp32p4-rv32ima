@@ -14,3 +14,7 @@ CONFIG_TASK_WDT=n
 # the emulator is compiled with -Og otherwise, huge difference
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y
+
+# the psram ships at 200MHz, sdkconfig from older idf runs pinned it to 20
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y

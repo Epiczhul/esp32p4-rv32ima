@@ -1,4 +1,4 @@
-# Building an MMU Linux guest (busybox)
+# Building an MMU Linux guest (busybox, no openwrt)
 
 The emulator boots the kernel in S-mode with Sv32 translation, SBI 0.2
 (BASE + TIME + legacy console) and a PLIC wired to the 16550 rx interrupt.

@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_attr.h"
+#include "esp_cache.h"
 #include "esp_flash.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -20,6 +21,22 @@
 #include "hal/usb_serial_jtag_ll.h"
 #include "psram.h"
 #include "port.h"
+
+/*
+ * Executable memory for the block JIT.  The code buffer comes out of the
+ * internal instruction RAM, every finished block gets flushed from the
+ * data side of the cache so instruction fetch sees it.
+ */
+void *jit_exec_alloc(int bytes)
+{
+        return heap_caps_malloc(bytes, MALLOC_CAP_EXEC);
+}
+
+void jit_exec_commit(void *code, int bytes)
+{
+        esp_cache_msync(code, bytes,
+                        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_INSTRAM);
+}
 
 uint64_t GetTimeMicroseconds()
 {

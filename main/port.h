@@ -16,4 +16,6 @@ int load_images(int ram_size, int *kern_len);
 uint32_t load_dtb(uint32_t ram_size);
 int console_read_bytes(uint8_t *buf, int len);
 void console_write(const char *buf, int len);
+void *jit_exec_alloc(int bytes);
+void jit_exec_commit(void *code, int bytes);
 #endif /* PORT_H */

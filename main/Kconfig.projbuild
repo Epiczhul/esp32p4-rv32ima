@@ -1,38 +1,66 @@
 menu "RV32IMA emulator"
 
-	config EMU_RAM_MB
-		int "Guest RAM size in MB"
-		default 16
-		range 4 32
-		help
-			Size of the guest RAM carved out of PSRAM. Must match the
-			memory node in the DTB you flash (uc-sv32.dts uses 16MB).
+        config EMU_RAM_MB
+                int "Guest RAM size in MB"
+                default 16
+                range 4 32
+                help
+                        Size of the guest RAM carved out of PSRAM. Must match the
+                        memory node in the DTB you flash (uc-sv32.dts uses 16MB).
 
-	config EMU_BOOT_SMODE
-		bool "Boot the kernel in S-mode (Sv32 MMU Linux)"
-		default y
-		help
-			Required for MMU Linux kernels (generic riscv 6.6+ built
-			with CONFIG_MMU). The emulator then acts as the machine
-			level firmware: Sv32 translation, SBI 0.2 (BASE + TIME +
-			legacy console), mideleg/medeleg delegation and a PLIC for
-			the uart rx interrupt. Disable it to boot the old NOMMU
-			M-mode kernel image.
+        config EMU_BOOT_SMODE
+                bool "Boot the kernel in S-mode (Sv32 MMU Linux)"
+                default y
+                help
+                        Required for MMU Linux kernels (generic riscv 6.6+ built
+                        with CONFIG_MMU). The emulator then acts as the machine
+                        level firmware: Sv32 translation, SBI 0.2 (BASE + TIME +
+                        legacy console), mideleg/medeleg delegation and a PLIC for
+                        the uart rx interrupt. Disable it to boot the old NOMMU
+                        M-mode kernel image.
 
-	config EMU_SOFTWARE_CACHE
-		bool "Software write-back cache in front of PSRAM"
-		default n
-		help
-			The old 4KB two way cache layer. On the ESP32-P4 the PSRAM
-			is already hardware cached, so direct access is faster.
-			Only enable this for experiments.
+        config EMU_SOFTWARE_CACHE
+                bool "Software write-back cache in front of PSRAM"
+                default n
+                help
+                        The old 4KB two way cache layer. On the ESP32-P4 the PSRAM
+                        is already hardware cached, so direct access is faster.
+                        Only enable this for experiments.
 
-	config EMU_CONSOLE_UART0
-		bool "Read console input from UART0"
-		default y
+        config EMU_CONSOLE_UART0
+                bool "Read console input from UART0"
+                default y
 
-	config EMU_CONSOLE_USB_JTAG
-		bool "Read console input from USB serial JTAG"
-		default y
+        config EMU_CONSOLE_USB_JTAG
+                bool "Read console input from USB serial JTAG"
+                default y
+
+        config EMU_IO_CORE
+                bool "Offload console I/O to the second core"
+                default y
+                help
+                        Pins the interpreter to core 0 and runs a worker on
+                        core 1 that feeds the uart rx ring and drains the tx
+                        ring, so the hot loop never stalls on serial writes.
+
+        config EMU_JIT
+                bool "Same-ISA block JIT (native execution layer)"
+                default y
+                help
+                        Re-emits hot straight-line guest code as native
+                        RV32 machine code and runs it on the cpu itself.
+                        Anything the block cannot swallow (csr, amo, ecall,
+                        mmio) falls back to the interpreter.  Disable this
+                        if a guest misbehaves, the interpreter alone is
+                        always correct.
+
+        config EMU_JIT_KB
+                int "JIT code buffer size in KB"
+                default 128
+                range 32 512
+                depends on EMU_JIT
+                help
+                        Internal RAM is tight, 128KB holds a few hundred
+                        hot blocks.  The cache flushes itself when full.
 
 endmenu
